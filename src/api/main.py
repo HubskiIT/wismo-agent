@@ -153,9 +153,7 @@ def prometheus_metrics() -> str:
 def validate(req: ValidateRequest) -> ValidateResponse:
     """Waliduje odpowiedź agenta przed wysłaniem do klienta."""
     redacted = redact_pii(req.text)
-    ok, reason = validate_response(
-        text=req.text, channel=req.channel, known_ids=set(req.known_ids)
-    )
+    ok, reason = validate_response(text=req.text, channel=req.channel, known_ids=set(req.known_ids))
     if ok:
         metrics["validate_ok_total"] += 1
     else:

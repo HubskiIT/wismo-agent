@@ -107,14 +107,17 @@ class TestRedactPii:
 
 
 class TestNormalizeOrderId:
-    @pytest.mark.parametrize("raw,expected", [
-        ("12345", "12345"),
-        ("#12345", "12345"),
-        ("Order #12345", "12345"),
-        ("zamowienie 12345", "12345"),
-        ("Zamowienie #67890", "67890"),
-        ("ord 999999", "999999"),
-    ])
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [
+            ("12345", "12345"),
+            ("#12345", "12345"),
+            ("Order #12345", "12345"),
+            ("zamowienie 12345", "12345"),
+            ("Zamowienie #67890", "67890"),
+            ("ord 999999", "999999"),
+        ],
+    )
     def test_valid_formats(self, raw, expected):
         assert normalize_order_id(raw) == expected
 

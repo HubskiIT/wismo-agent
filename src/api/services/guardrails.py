@@ -1,7 +1,6 @@
 """Guardrails i walidacje. Uruchamiane przed wysłaniem odpowiedzi agenta."""
 
 import re
-from typing import Tuple
 
 # ---------------------------------------------------------------------------
 # Konfiguracja
@@ -40,7 +39,8 @@ ORDER_ID_NORMALIZE_RE = re.compile(r"(?:zam[oó]wieni[ea]|order|ord)?[ #]*([0-9]
 # Walidacja
 # ---------------------------------------------------------------------------
 
-def validate_response(text: str, channel: str, known_ids: set[str]) -> Tuple[bool, str]:
+
+def validate_response(text: str, channel: str, known_ids: set[str]) -> tuple[bool, str]:
     """
     Waliduje odpowiedź agenta.
     Zwraca (is_valid, reason). Jeżeli False, agent musi wygenerować odpowiedź ponownie.
@@ -78,6 +78,7 @@ def validate_response(text: str, channel: str, known_ids: set[str]) -> Tuple[boo
 # PII redaction
 # ---------------------------------------------------------------------------
 
+
 def redact_pii(text: str) -> str:
     """Zastępuje PII (karty, PESEL, IBAN) placeholderami. Do logów i przed wysłaniem do LLM."""
     text = CARD_NUMBER_RE.sub("[CARD_REDACTED]", text)
@@ -89,6 +90,7 @@ def redact_pii(text: str) -> str:
 # ---------------------------------------------------------------------------
 # Normalizacja danych identyfikacji
 # ---------------------------------------------------------------------------
+
 
 def normalize_order_id(raw: str) -> str | None:
     """Wyciąga numer zamówienia z dowolnego formatu (#12345, zamowienie 12345, itp.)."""
