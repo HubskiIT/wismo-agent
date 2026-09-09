@@ -1,0 +1,140 @@
+{
+  "name": "05 WISMO Tool Get Order",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "order_id", "type": "string" },
+            { "name": "backend", "type": "string" }
+          ]
+        }
+      },
+      "name": "Sub-workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Wybor backendu: 'shopify' (domyslny) lub 'baselinker'.\nconst backend = ($json.backend || 'shopify').toLowerCase();\nconst orderId = ($json.order_id || '').replace(/[^0-9]/g, '');\nif (!orderId) {\n  return [{ json: { error: 'invalid_order_id', order_id: $json.order_id } }];\n}\nreturn [{ json: { backend, order_id: orderId } }];"
+      },
+      "name": "Route Backend",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "combinator": "and" }, "conditions": [{ "leftValue": "={{ $json.backend }}", "rightValue": "shopify", "operator": { "type": "string", "operation": "equals" } }] }, "outputKey": "shopify" },
+            { "conditions": { "options": { "combinator": "and" }, "conditions": [{ "leftValue": "={{ $json.backend }}", "rightValue": "baselinker", "operator": { "type": "string", "operation": "equals" } }] }, "outputKey": "baselinker" }
+          ]
+        }
+      },
+      "name": "Switch",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $env.SHOPIFY_STORE }}/admin/api/2024-10/orders/{{ $json.order_id }}.json",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Shopify-Access-Token", "value": "={{ $env.SHOPIFY_ADMIN_TOKEN }}" }
+          ]
+        },
+        "options": {
+          "timeout": 5000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 }
+        }
+      },
+      "name": "Shopify Get",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "const o = $json.order;\nif (!o) return [{ json: { error: 'order_not_found' } }];\nreturn [{ json: {\n  order_id: String(o.id),\n  status: o.financial_status,\n  fulfillment_status: o.fulfillment_status,\n  total_price: parseFloat(o.total_price),\n  currency: o.currency,\n  line_items_count: (o.line_items || []).length,\n  customer: {\n    name: `${o.customer?.first_name || ''} ${o.customer?.last_name || ''}`.trim(),\n    email: o.customer?.email\n  },\n  shipping: {\n    method: o.shipping_lines?.[0]?.title,\n    address: o.shipping_address ? `${o.shipping_address.address1}, ${o.shipping_address.zip} ${o.shipping_address.city}` : null\n  },\n  tracking: {\n    number: o.fulfillments?.[0]?.tracking_number || null,\n    carrier: o.fulfillments?.[0]?.tracking_company || null\n  },\n  created_at: o.created_at\n}}];"
+      },
+      "name": "Normalize Shopify",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1080, 220]
+    },
+    {
+      "parameters": {
+        "url": "https://api.baselinker.com/connector.php",
+        "method": "POST",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-BLToken", "value": "={{ $env.BASELINKER_TOKEN }}" }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "method", "value": "getOrders" },
+            { "name": "parameters", "value": "={{ JSON.stringify({ order_id: parseInt($json.order_id, 10) }) }}" }
+          ]
+        },
+        "options": {
+          "timeout": 5000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 }
+        }
+      },
+      "name": "BaseLinker Get",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 380]
+    },
+    {
+      "parameters": {
+        "functionCode": "const o = $json.orders?.[0];\nif (!o) return [{ json: { error: 'order_not_found' } }];\nreturn [{ json: {\n  order_id: String(o.order_id),\n  status: o.order_status_id,\n  total_price: parseFloat(o.price_brutto),\n  currency: o.currency,\n  line_items_count: (o.products || []).length,\n  customer: {\n    name: `${o.delivery_fullname || ''}`.trim(),\n    email: o.email\n  },\n  shipping: {\n    method: o.delivery_method,\n    address: `${o.delivery_address}, ${o.delivery_postcode} ${o.delivery_city}`\n  },\n  tracking: {\n    number: o.delivery_package_nr || null,\n    carrier: o.delivery_package_module || null\n  },\n  created_at: new Date(o.date_add * 1000).toISOString()\n}}];"
+      },
+      "name": "Normalize BaseLinker",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1080, 380]
+    },
+    {
+      "parameters": {},
+      "name": "Merge Result",
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3,
+      "position": [1300, 300]
+    }
+  ],
+  "connections": {
+    "Sub-workflow Trigger": { "main": [[{ "node": "Route Backend", "type": "main", "index": 0 }]] },
+    "Route Backend": { "main": [[{ "node": "Switch", "type": "main", "index": 0 }]] },
+    "Switch": {
+      "main": [
+        [{ "node": "Shopify Get", "type": "main", "index": 0 }],
+        [{ "node": "BaseLinker Get", "type": "main", "index": 0 }]
+      ]
+    },
+    "Shopify Get": { "main": [[{ "node": "Normalize Shopify", "type": "main", "index": 0 }]] },
+    "Normalize Shopify": { "main": [[{ "node": "Merge Result", "type": "main", "index": 0 }]] },
+    "BaseLinker Get": { "main": [[{ "node": "Normalize BaseLinker", "type": "main", "index": 0 }]] },
+    "Normalize BaseLinker": { "main": [[{ "node": "Merge Result", "type": "main", "index": 1 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Sub workflow narzedzia get_order. Wybor backendu Shopify albo BaseLinker przez parametr backend. Normalizacja do wspolnego formatu wewnetrznego niezaleznego od zrodla."
+  },
+  "tags": ["wismo", "sub-workflow", "tool", "integration"]
+}

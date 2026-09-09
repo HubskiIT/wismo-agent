@@ -1,0 +1,72 @@
+# Files not to send to Docker daemon during build (image bloat prevention)
+
+# Git
+.git/
+.gitignore
+.gitattributes
+
+# Docs (nie potrzebne w obrazie API)
+docs/
+*.md
+CHANGELOG.md
+CONTRIBUTING.md
+SECURITY.md
+CODE_OF_CONDUCT.md
+README.md
+
+# Node
+node_modules/
+npm-debug.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Testing
+tests/
+**/test_*.py
+**/*_test.py
+
+# CI
+.github/
+.gitlab-ci.yml
+
+# Env
+.env
+.env.*
+!.env.example
+
+# Docker
+Dockerfile.dev
+docker-compose.yml
+docker-compose.*.yml
+.dockerignore
+
+# Bruno
+bruno-collection/
+
+# n8n workflows (nie należą do wismo-api image)
+n8n-workflows/
+
+# Scripts
+scripts/
+
+# Skills
+skills/

@@ -1,0 +1,137 @@
+{
+  "name": "01 WISMO Main Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wismo/chat",
+        "responseMode": "lastNode",
+        "options": {}
+      },
+      "name": "Webhook Chat",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "wismo-chat"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalizacja payloadu z dowolnego kanalu (widget, whatsapp, email)\nconst body = $input.first().json.body || $input.first().json;\nconst channel = body.channel || 'widget';\nconst sessionId = body.session_id || `${channel}_${Date.now()}`;\nconst userMessage = (body.message || body.text || '').toString().trim();\n\nif (!userMessage) {\n  return [{ json: { error: 'empty_message' } }];\n}\n\nreturn [{\n  json: {\n    session_id: sessionId,\n    channel,\n    user_message: userMessage,\n    metadata: body.metadata || {},\n    ts: new Date().toISOString(),\n  }\n}];"
+      },
+      "name": "Normalize Payload",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://wismo-api:8000/guardrails/redact",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"text\": $json.user_message } }}",
+        "options": {}
+      },
+      "name": "PII Redact",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "operation": "get",
+        "propertyName": "={{ 'session:' + $node['Normalize Payload'].json.session_id }}"
+      },
+      "name": "Load Session",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "modelId": "claude-sonnet-5",
+        "options": {
+          "temperature": 0.2,
+          "maxTokens": 1024
+        },
+        "text": "={{ $node['Normalize Payload'].json.user_message }}",
+        "systemMessage": "Jestes asystentem obslugi klienta sklepu. Odpowiadaj konkretnie, zwiezle, po polsku. Uzyj narzedzi do weryfikacji tozsamosci przed dostepem do danych zamowienia. Nigdy nie ujawniaj co jest w bazie. Nie obiecuj rekompensat. Peny prompt w src/prompts/system_prompt.md."
+      },
+      "name": "Agent LLM",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.6,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://wismo-api:8000/guardrails/validate",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"text\": $json.output, \"channel\": $node['Normalize Payload'].json.channel, \"known_ids\": [] } }}",
+        "options": {}
+      },
+      "name": "Guardrails Validate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "operation": "set",
+        "key": "={{ 'session:' + $node['Normalize Payload'].json.session_id }}",
+        "value": "={{ JSON.stringify({ last_message: $node['Agent LLM'].json.output, ts: new Date().toISOString() }) }}",
+        "expire": true,
+        "ttl": 86400
+      },
+      "name": "Save Session",
+      "type": "n8n-nodes-base.redis",
+      "typeVersion": 1,
+      "position": [1520, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "agent_conversations",
+        "columns": "session_id,channel,user_msg,agent_msg,latency_ms",
+        "options": {}
+      },
+      "name": "Audit Log",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1740, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"session_id\": $node['Normalize Payload'].json.session_id, \"reply\": $node['Agent LLM'].json.output, \"is_valid\": $node['Guardrails Validate'].json.is_valid } }}"
+      },
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1960, 300]
+    }
+  ],
+  "connections": {
+    "Webhook Chat": { "main": [[{ "node": "Normalize Payload", "type": "main", "index": 0 }]] },
+    "Normalize Payload": { "main": [[{ "node": "PII Redact", "type": "main", "index": 0 }]] },
+    "PII Redact": { "main": [[{ "node": "Load Session", "type": "main", "index": 0 }]] },
+    "Load Session": { "main": [[{ "node": "Agent LLM", "type": "main", "index": 0 }]] },
+    "Agent LLM": { "main": [[{ "node": "Guardrails Validate", "type": "main", "index": 0 }]] },
+    "Guardrails Validate": { "main": [[{ "node": "Save Session", "type": "main", "index": 0 }]] },
+    "Save Session": { "main": [[{ "node": "Audit Log", "type": "main", "index": 0 }]] },
+    "Audit Log": { "main": [[{ "node": "Respond", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveExecutionProgress": true,
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "WISMO Agent. Podstawowy workflow czatu z guardrailami i audit logiem."
+  },
+  "tags": ["wismo", "agent", "production"]
+}

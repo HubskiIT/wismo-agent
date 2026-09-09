@@ -1,0 +1,94 @@
+{
+  "name": "03 WISMO Escalation Handler",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "priority", "type": "string" },
+            { "name": "reason_code", "type": "string" },
+            { "name": "summary", "type": "string" },
+            { "name": "session_id", "type": "string" },
+            { "name": "customer", "type": "object" },
+            { "name": "order", "type": "object" },
+            { "name": "shipment", "type": "object" }
+          ]
+        }
+      },
+      "name": "Sub-workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Generuje ustrukturyzowany brief eskalacyjny i przygotowuje payload dla Slacka.\nconst input = $input.first().json;\nconst now = new Date();\nconst pad = (n) => String(n).padStart(2, '0');\nconst dateStamp = `${now.getFullYear()}_${pad(now.getMonth()+1)}_${pad(now.getDate())}`;\nconst timeStamp = `${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;\nconst escalationId = `esc_${dateStamp}_${timeStamp}_${Math.floor(Math.random()*10000).toString().padStart(4,'0')}`;\n\nconst priority = ['Low','Medium','High'].includes(input.priority) ? input.priority : 'Medium';\nconst priorityEmoji = { High: ':rotating_light:', Medium: ':warning:', Low: ':information_source:' };\nconst priorityColor = { High: '#BF4859', Medium: '#B27916', Low: '#5A6478' };\n\nconst brief = {\n  escalation_id: escalationId,\n  priority,\n  reason_code: input.reason_code || 'unknown',\n  session_id: input.session_id,\n  customer: input.customer || {},\n  order: input.order || {},\n  shipment: input.shipment || {},\n  summary: input.summary || '',\n  created_at: now.toISOString()\n};\n\n// Payload Slack Block Kit\nconst slackPayload = {\n  attachments: [{\n    color: priorityColor[priority],\n    blocks: [\n      {\n        type: 'header',\n        text: { type: 'plain_text', text: `${priorityEmoji[priority]} Eskalacja ${priority}: ${input.reason_code}` }\n      },\n      {\n        type: 'section',\n        fields: [\n          { type: 'mrkdwn', text: `*Klient:*\\n${input.customer?.name || 'nieznany'}\\n${input.customer?.email || ''}` },\n          { type: 'mrkdwn', text: `*Zamowienie:*\\n#${input.order?.id || '-'}\\n${input.order?.value_pln || 0} PLN` },\n          { type: 'mrkdwn', text: `*Kanal:*\\n${input.customer?.channel || 'widget'}` },\n          { type: 'mrkdwn', text: `*Kurier:*\\n${input.shipment?.carrier || '-'}\\n${input.shipment?.tracking || '-'}` }\n        ]\n      },\n      {\n        type: 'section',\n        text: { type: 'mrkdwn', text: `*Kontekst:*\\n${input.summary || 'brak podsumowania'}` }\n      },\n      {\n        type: 'actions',\n        elements: [\n          { type: 'button', text: { type: 'plain_text', text: 'Przejmuje' }, style: 'primary', value: `take:${escalationId}` },\n          { type: 'button', text: { type: 'plain_text', text: 'Zamknij bez akcji' }, value: `close:${escalationId}` },\n          { type: 'button', text: { type: 'plain_text', text: 'Odsylam do agenta' }, value: `return:${escalationId}` }\n        ]\n      },\n      {\n        type: 'context',\n        elements: [\n          { type: 'mrkdwn', text: `escalation_id: \\`${escalationId}\\` · session: \\`${input.session_id}\\`` }\n        ]\n      }\n    ]\n  }]\n};\n\nreturn [{ json: { brief, slackPayload, escalationId } }];"
+      },
+      "name": "Build Brief",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "operation": "insert",
+        "schema": "public",
+        "table": "escalations",
+        "columns": "escalation_id,session_id,priority,reason_code,payload",
+        "additionalFields": {}
+      },
+      "name": "Save Escalation",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [640, 220]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.SLACK_ESCALATION_WEBHOOK }}",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($node['Build Brief'].json.slackPayload) }}",
+        "options": {
+          "timeout": 5000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 }
+        }
+      },
+      "name": "Push to Slack",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [640, 380]
+    },
+    {
+      "parameters": {
+        "functionCode": "return [{ json: { escalation_id: $node['Build Brief'].json.escalationId, delivered: true } }];"
+      },
+      "name": "Return Result",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [860, 300]
+    }
+  ],
+  "connections": {
+    "Sub-workflow Trigger": { "main": [[{ "node": "Build Brief", "type": "main", "index": 0 }]] },
+    "Build Brief": {
+      "main": [[
+        { "node": "Save Escalation", "type": "main", "index": 0 },
+        { "node": "Push to Slack", "type": "main", "index": 0 }
+      ]]
+    },
+    "Save Escalation": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] },
+    "Push to Slack": { "main": [[{ "node": "Return Result", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Sub workflow eskalacji Human in the Loop. Wywolywany jako Tool `create_escalation`. Buduje brief JSON, zapisuje do Postgres i pushuje payload Slack Block Kit z przyciskami akcji."
+  },
+  "tags": ["wismo", "sub-workflow", "hitl", "tool"]
+}

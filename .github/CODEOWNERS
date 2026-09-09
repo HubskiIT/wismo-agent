@@ -1,0 +1,18 @@
+# CODEOWNERS
+# Definiuje osoby wymagane do review PR na konkretne ścieżki.
+# Format: <ścieżka> <owner>.
+
+# Global default
+* @grzybowski-it
+
+# Krytyczne obszary (double review polecony)
+/src/api/services/guardrails.py @grzybowski-it
+/src/prompts/ @grzybowski-it
+/SECURITY.md @grzybowski-it
+/docker/nginx/ @grzybowski-it
+/.github/workflows/ @grzybowski-it
+
+# Dokumentacja
+/docs/ @grzybowski-it
+/README.md @grzybowski-it
+/CHANGELOG.md @grzybowski-it

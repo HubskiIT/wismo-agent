@@ -1,0 +1,141 @@
+{
+  "name": "06 WISMO Tool Get Tracking",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "tracking_number", "type": "string" }
+          ]
+        }
+      },
+      "name": "Sub-workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Auto detekcja przewoznika po formacie numeru listu przewozowego.\nconst raw = ($json.tracking_number || '').replace(/\\s+/g, '');\nif (!raw) return [{ json: { error: 'empty_tracking' } }];\n\nlet carrier = 'unknown';\n\n// InPost: 24 cyfry albo 12-14 cyfr zaczynajace sie od 6\nif (/^6\\d{11,23}$/.test(raw)) carrier = 'inpost';\n// DPD: 14 cyfr zaczynajace sie od 0 lub 5\nelse if (/^[05]\\d{13}$/.test(raw)) carrier = 'dpd';\n// DHL: 10 cyfr\nelse if (/^\\d{10}$/.test(raw)) carrier = 'dhl';\n// Poczta Polska: 20 znakow, kombinacja liter i cyfr, konczy sie na PL\nelse if (/^[A-Z]{2}\\d{9}PL$/i.test(raw)) carrier = 'poczta';\n// FedEx: 12 cyfr\nelse if (/^\\d{12}$/.test(raw)) carrier = 'fedex';\n// UPS: 1Z + 16 znakow\nelse if (/^1Z[A-Z0-9]{16}$/i.test(raw)) carrier = 'ups';\n\nreturn [{ json: { tracking_number: raw, carrier } }];"
+      },
+      "name": "Detect Carrier",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            { "conditions": { "options": { "combinator": "and" }, "conditions": [{ "leftValue": "={{ $json.carrier }}", "rightValue": "inpost", "operator": { "type": "string", "operation": "equals" } }] }, "outputKey": "inpost" },
+            { "conditions": { "options": { "combinator": "and" }, "conditions": [{ "leftValue": "={{ $json.carrier }}", "rightValue": "dpd", "operator": { "type": "string", "operation": "equals" } }] }, "outputKey": "dpd" },
+            { "conditions": { "options": { "combinator": "and" }, "conditions": [{ "leftValue": "={{ $json.carrier }}", "rightValue": "dhl", "operator": { "type": "string", "operation": "equals" } }] }, "outputKey": "dhl" },
+            { "conditions": { "options": { "combinator": "and" }, "conditions": [{ "leftValue": "={{ $json.carrier }}", "rightValue": "poczta", "operator": { "type": "string", "operation": "equals" } }] }, "outputKey": "poczta" }
+          ]
+        }
+      },
+      "name": "Switch Carrier",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api-shipx-pl.easypack24.net/v1/tracking/{{ $json.tracking_number }}",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.INPOST_API_TOKEN }}" }
+          ]
+        },
+        "options": { "timeout": 5000, "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 } }
+      },
+      "name": "InPost API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 180]
+    },
+    {
+      "parameters": {
+        "url": "=https://tracktrace.dpd.com.pl/parcelDetails?p={{ $json.tracking_number }}",
+        "method": "GET",
+        "options": { "timeout": 5000, "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 } }
+      },
+      "name": "DPD API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 260]
+    },
+    {
+      "parameters": {
+        "url": "=https://api-eu.dhl.com/track/shipments?trackingNumber={{ $json.tracking_number }}",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "DHL-API-Key", "value": "={{ $env.DHL_API_KEY }}" }
+          ]
+        },
+        "options": { "timeout": 5000, "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 } }
+      },
+      "name": "DHL API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 340]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.poczta-polska.pl/tracking/track/v1/tracking/{{ $json.tracking_number }}",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "Authorization", "value": "=Bearer {{ $env.POCZTA_API_TOKEN }}" }
+          ]
+        },
+        "options": { "timeout": 5000, "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 } }
+      },
+      "name": "Poczta API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 420]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Normalizacja odpowiedzi kuriera do wspolnego formatu wewnetrznego.\nconst carrier = $node['Detect Carrier'].json.carrier;\nconst raw = $json;\n\nlet normalized = {\n  tracking_number: $node['Detect Carrier'].json.tracking_number,\n  carrier,\n  status: 'unknown',\n  status_readable: null,\n  last_scan_datetime: null,\n  last_scan_location: null,\n  estimated_delivery: null,\n  history: []\n};\n\nif (carrier === 'inpost') {\n  const history = raw.tracking_details || raw.status_history || [];\n  normalized.status = raw.status || 'unknown';\n  normalized.status_readable = raw.status;\n  normalized.last_scan_datetime = history[0]?.datetime;\n  normalized.last_scan_location = history[0]?.origin_status?.name;\n  normalized.estimated_delivery = raw.expected_delivery_date;\n  normalized.history = history.slice(0, 5).map(h => ({ ts: h.datetime, status: h.status, location: h.origin_status?.name }));\n} else if (carrier === 'dpd') {\n  const events = raw.events || [];\n  normalized.status = raw.status || 'unknown';\n  normalized.last_scan_datetime = events[0]?.date;\n  normalized.last_scan_location = events[0]?.location;\n  normalized.history = events.slice(0, 5).map(e => ({ ts: e.date, status: e.description, location: e.location }));\n} else if (carrier === 'dhl') {\n  const s = raw.shipments?.[0];\n  const events = s?.events || [];\n  normalized.status = s?.status?.status || 'unknown';\n  normalized.last_scan_datetime = events[0]?.timestamp;\n  normalized.last_scan_location = events[0]?.location?.address?.addressLocality;\n  normalized.estimated_delivery = s?.estimatedTimeOfDelivery;\n  normalized.history = events.slice(0, 5).map(e => ({ ts: e.timestamp, status: e.description, location: e.location?.address?.addressLocality }));\n} else if (carrier === 'poczta') {\n  const items = raw.items || [];\n  normalized.status = items[items.length-1]?.status || 'unknown';\n  normalized.last_scan_datetime = items[items.length-1]?.date;\n  normalized.last_scan_location = items[items.length-1]?.location;\n  normalized.history = items.slice(-5).reverse().map(i => ({ ts: i.date, status: i.status, location: i.location }));\n}\n\nreturn [{ json: normalized }];"
+      },
+      "name": "Normalize Response",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1080, 300]
+    }
+  ],
+  "connections": {
+    "Sub-workflow Trigger": { "main": [[{ "node": "Detect Carrier", "type": "main", "index": 0 }]] },
+    "Detect Carrier": { "main": [[{ "node": "Switch Carrier", "type": "main", "index": 0 }]] },
+    "Switch Carrier": {
+      "main": [
+        [{ "node": "InPost API", "type": "main", "index": 0 }],
+        [{ "node": "DPD API", "type": "main", "index": 0 }],
+        [{ "node": "DHL API", "type": "main", "index": 0 }],
+        [{ "node": "Poczta API", "type": "main", "index": 0 }]
+      ]
+    },
+    "InPost API": { "main": [[{ "node": "Normalize Response", "type": "main", "index": 0 }]] },
+    "DPD API": { "main": [[{ "node": "Normalize Response", "type": "main", "index": 0 }]] },
+    "DHL API": { "main": [[{ "node": "Normalize Response", "type": "main", "index": 0 }]] },
+    "Poczta API": { "main": [[{ "node": "Normalize Response", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Sub workflow narzedzia get_tracking. Auto detekcja przewoznika (InPost, DPD, DHL, Poczta Polska, FedEx, UPS) po formacie numeru. Normalizacja odpowiedzi do wspolnego formatu wewnetrznego dla agenta."
+  },
+  "tags": ["wismo", "sub-workflow", "tool", "integration", "carriers"]
+}

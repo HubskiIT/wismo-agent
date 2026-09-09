@@ -1,0 +1,91 @@
+{
+  "name": "08 WISMO Channel Email",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            { "mode": "everyMinute" }
+          ]
+        },
+        "options": {
+          "customEmailConfig": "['UNSEEN']",
+          "downloadAttachments": false
+        }
+      },
+      "name": "IMAP Poll",
+      "type": "n8n-nodes-base.emailReadImap",
+      "typeVersion": 2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Parsowanie wiadomosci email plus normalizacja.\nconst msg = $json;\nconst from = msg.from?.value?.[0]?.address || msg.from || '';\nconst subject = msg.subject || '';\nconst text = (msg.text || msg.textAsHtml || '').toString().trim();\n\n// Wyciagnij numer zamowienia z tematu lub tresci.\nconst orderIdRegex = /(?:zam[oó]wienie|order|ord|#)[ #]*([0-9]{4,10})/i;\nconst orderMatch = (subject + ' ' + text).match(orderIdRegex);\nconst extractedOrderId = orderMatch ? orderMatch[1] : null;\n\n// Wyciagnij custom naglowek jesli wczesniej byla korespondencja.\nconst customHeader = msg.headers?.['x-wismo-session'];\nconst sessionId = customHeader || `email_${from.replace(/[^a-z0-9]/gi, '_')}_${Date.now()}`;\n\n// Sanityzacja tresci: usun cytaty odpowiedzi (linie zaczynajace sie od >, sygnatury po --).\nlet cleanText = text\n  .replace(/^>.*$/gm, '')\n  .split(/^-- $/m)[0]\n  .replace(/\\n{3,}/g, '\\n\\n')\n  .trim();\n\nif (!cleanText) {\n  return [{ json: { error: 'empty_message', from } }];\n}\n\nreturn [{\n  json: {\n    session_id: sessionId,\n    channel: 'email',\n    user_message: cleanText,\n    metadata: {\n      from,\n      subject,\n      extracted_order_id: extractedOrderId,\n      message_id: msg.messageId,\n      in_reply_to: msg.inReplyTo\n    },\n    ts: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Parse Email",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": { "value": "01_main_agent", "cachedResultName": "01 WISMO Main Agent" },
+        "workflowInputs": {
+          "values": [
+            { "name": "channel", "value": "email" },
+            { "name": "session_id", "value": "={{ $json.session_id }}" },
+            { "name": "message", "value": "={{ $json.user_message }}" },
+            { "name": "extracted_order_id", "value": "={{ $json.metadata.extracted_order_id }}" }
+          ]
+        }
+      },
+      "name": "Delegate to Main Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Format HTML dla emaila plus sygnatura sklepu.\nconst reply = $json.reply || '(brak odpowiedzi)';\nconst storeName = $env.STORE_NAME || 'Sklep';\nconst supportEmail = $env.SUPPORT_EMAIL || 'support@example.com';\nconst orderId = $node['Parse Email'].json.metadata.extracted_order_id;\n\n// Konwersja podstawowego markdown do HTML.\nlet htmlBody = reply\n  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')\n  .replace(/\\n\\n/g, '</p><p>')\n  .replace(/\\n/g, '<br>')\n  .replace(/\\*\\*(.+?)\\*\\*/g, '<strong>$1</strong>')\n  .replace(/\\*(.+?)\\*/g, '<em>$1</em>');\n\nconst html = `<!DOCTYPE html><html><body style=\"font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; max-width: 600px; margin: 0 auto; color: #12182A; line-height: 1.6;\">\n<p>${htmlBody}</p>\n<hr style=\"border: none; border-top: 1px solid #D8D3C7; margin: 24px 0;\">\n<p style=\"font-size: 12px; color: #5A6478;\">${storeName}. Wiadomosc wygenerowana automatycznie. Odpowiedz aby porozmawiac dalej.<br>Kontakt: ${supportEmail}</p>\n</body></html>`;\n\nreturn [{\n  json: {\n    subject: orderId ? `Re: zamowienie #${orderId}` : `Odpowiedz od ${storeName}`,\n    html,\n    text: reply,\n    custom_headers: {\n      'X-WISMO-Session': $node['Parse Email'].json.session_id,\n      'X-Auto-Response': 'wismo-agent'\n    }\n  }\n}];"
+      },
+      "name": "Format Email Reply",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "fromEmail": "={{ $env.SUPPORT_EMAIL }}",
+        "toEmail": "={{ $node['Parse Email'].json.metadata.from }}",
+        "subject": "={{ $json.subject }}",
+        "html": "={{ $json.html }}",
+        "text": "={{ $json.text }}",
+        "options": {
+          "replyTo": "={{ $env.SUPPORT_EMAIL }}",
+          "customHeaders": "={{ JSON.stringify($json.custom_headers) }}"
+        }
+      },
+      "name": "Send Reply",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1080, 300]
+    }
+  ],
+  "connections": {
+    "IMAP Poll": { "main": [[{ "node": "Parse Email", "type": "main", "index": 0 }]] },
+    "Parse Email": { "main": [[{ "node": "Delegate to Main Agent", "type": "main", "index": 0 }]] },
+    "Delegate to Main Agent": { "main": [[{ "node": "Format Email Reply", "type": "main", "index": 0 }]] },
+    "Format Email Reply": { "main": [[{ "node": "Send Reply", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Kanal Email (IMAP polling + SMTP send). Odczyt UNSEEN co minute, parser tresci (usuwa cytaty i sygnatury), ekstrakcja numeru zamowienia z tematu/tresci, delegacja do glownego agenta, formatowanie HTML z sygnatura sklepu, wysylka z custom naglowkiem X-WISMO-Session do trackowania watkow."
+  },
+  "tags": ["wismo", "channel", "email", "imap", "smtp"]
+}

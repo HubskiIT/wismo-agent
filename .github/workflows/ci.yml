@@ -1,0 +1,220 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  security-events: write
+  pull-requests: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint i format
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: pip install ruff==0.6.5
+
+      - name: Ruff check
+        working-directory: src
+        run: ruff check api/
+
+      - name: Ruff format check
+        working-directory: src
+        run: ruff format --check api/
+
+      - name: YAML lint
+        uses: karancode/yamllint-github-action@v3.0.0
+        with:
+          yamllint_file_or_dir: '.'
+          yamllint_config_filepath: '.yamllint.yaml'
+          yamllint_strict: false
+
+  # ---------------------------------------------------------------------------
+  # Testy plus coverage
+  # ---------------------------------------------------------------------------
+  test:
+    name: Tests (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: src
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run tests with coverage
+        working-directory: src
+        run: |
+          pytest api/tests/ -v \
+            --cov=api \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: src/coverage.xml
+          fail_ci_if_error: false
+          verbose: true
+
+  # ---------------------------------------------------------------------------
+  # Type check (mypy)
+  # ---------------------------------------------------------------------------
+  typecheck:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        working-directory: src
+        run: |
+          pip install -r requirements.txt
+          pip install mypy==1.11.2
+
+      - name: Run mypy
+        working-directory: src
+        run: mypy api/ --ignore-missing-imports --check-untyped-defs || true
+        # `|| true` bo pierwszy przebieg, docelowo bez tego
+
+  # ---------------------------------------------------------------------------
+  # SAST (bandit)
+  # ---------------------------------------------------------------------------
+  sast:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install bandit
+        run: pip install bandit[toml]==1.7.10
+
+      - name: Run bandit
+        working-directory: src
+        run: bandit -r api/ -f json -o bandit-report.json || true
+
+      - name: Upload SAST report
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: bandit-report
+          path: src/bandit-report.json
+
+  # ---------------------------------------------------------------------------
+  # Secrets scan (gitleaks)
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: Secrets scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Docker build (smoke) plus Trivy container scan
+  # ---------------------------------------------------------------------------
+  docker:
+    name: Docker build & scan
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build wismo-api image
+        uses: docker/build-push-action@v6
+        with:
+          context: src/
+          file: src/Dockerfile
+          push: false
+          load: true
+          tags: wismo-api:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.24.0
+        with:
+          image-ref: wismo-api:ci
+          format: sarif
+          output: trivy-results.sarif
+          severity: CRITICAL,HIGH
+          exit-code: '0'
+
+      - name: Upload Trivy scan results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-results.sarif
+
+      - name: Validate docker compose config
+        run: |
+          cp docker/.env.example docker/.env
+          docker compose -f docker/docker-compose.yml --env-file docker/.env config > /dev/null
+
+  # ---------------------------------------------------------------------------
+  # Workflow JSON validation
+  # ---------------------------------------------------------------------------
+  n8n-workflows:
+    name: n8n workflows validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate all workflow JSON files
+        run: |
+          for f in n8n-workflows/*.json; do
+            python3 -c "import json,sys; json.load(open(sys.argv[1]))" "$f"
+            echo "✓ $f"
+          done

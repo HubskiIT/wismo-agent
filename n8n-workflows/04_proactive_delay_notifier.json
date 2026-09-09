@@ -1,0 +1,163 @@
+{
+  "name": "04 WISMO Proactive Delay Notifier",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            { "field": "hours", "hoursInterval": 1 }
+          ]
+        }
+      },
+      "name": "Cron Every Hour",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT DISTINCT ON (order_id) order_id, session_id, tools_used, agent_msg, created_at FROM agent_conversations WHERE created_at > NOW() - INTERVAL '7 days' AND order_id IS NOT NULL AND (tools_used->>'shipment_status') IN ('in_transit','sortownia') ORDER BY order_id, created_at DESC;",
+        "options": {}
+      },
+      "name": "Fetch Active Orders",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "batchSize": 10,
+        "options": {}
+      },
+      "name": "Batch",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "url": "={{ $env.INPOST_BASE_URL }}/tracking/{{ $json.tracking_number }}",
+        "method": "GET",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {
+          "timeout": 5000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 }
+        }
+      },
+      "name": "Check Tracking",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Wykrywa opoznienia: ostatni skan starszy niz 36h albo status nie zmienil sie od 24h.\nconst tracking = $json;\nconst lastScanIso = tracking.status_history?.[0]?.datetime || tracking.updated_at;\nif (!lastScanIso) return [{ json: { skip: true, reason: 'no_scan_data' } }];\n\nconst lastScan = new Date(lastScanIso);\nconst hoursSince = (Date.now() - lastScan.getTime()) / 1000 / 3600;\n\nif (hoursSince < 36) {\n  return [{ json: { skip: true, reason: 'fresh_scan', hours_since: hoursSince } }];\n}\n\nreturn [{\n  json: {\n    skip: false,\n    order_id: $node['Batch'].json.order_id,\n    session_id: $node['Batch'].json.session_id,\n    tracking_number: tracking.tracking_number,\n    hours_since_scan: Math.round(hoursSince),\n    last_status: tracking.status,\n    last_location: tracking.status_history?.[0]?.origin_status?.name || 'nieznana'\n  }\n}];"
+      },
+      "name": "Detect Delay",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "combinator": "and" },
+          "conditions": [
+            { "leftValue": "={{ $json.skip }}", "rightValue": false, "operator": { "type": "boolean", "operation": "equals" } }
+          ]
+        }
+      },
+      "name": "IF Delay Detected",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1300, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Sprawdza czy juz raz nie wyslalismy proaktywnego powiadomienia dla tego zamowienia w ostatnich 24h.\n// (Deduplikacja przez Redis albo Postgres, tu placeholder - dodaj Redis check w produkcji.)\nconst payload = $json;\nconst message = `Twoja paczka ${payload.tracking_number} podrozuje dluzej niz zwykle. Ostatnia aktualizacja od kuriera byla ${payload.hours_since_scan} godzin temu, w lokalizacji: ${payload.last_location}. Sprawdzam u przewoznika, wroce z aktualizacja w ciagu kilku godzin.`;\n\nreturn [{\n  json: {\n    ...payload,\n    notification_message: message,\n    channel: 'email',\n    proactive: true\n  }\n}];"
+      },
+      "name": "Build Message",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1520, 220]
+    },
+    {
+      "parameters": {
+        "fromEmail": "noreply@mojsklep.pl",
+        "toEmail": "={{ $json.customer_email }}",
+        "subject": "={{ 'Aktualizacja przesylki #' + $json.order_id }}",
+        "text": "={{ $json.notification_message }}",
+        "options": {}
+      },
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1740, 220]
+    },
+    {
+      "parameters": {
+        "workflowId": { "value": "03_escalation_handler", "cachedResultName": "03 WISMO Escalation Handler" },
+        "workflowInputs": {
+          "values": [
+            { "name": "priority", "value": "Medium" },
+            { "name": "reason_code", "value": "E03_delay_no_update_36h" },
+            { "name": "summary", "value": "=Paczka {{ $json.tracking_number }} bez skanu od {{ $json.hours_since_scan }}h. Ostatnia lokalizacja: {{ $json.last_location }}." },
+            { "name": "session_id", "value": "={{ 'proactive_' + $json.order_id }}" }
+          ]
+        }
+      },
+      "name": "Escalate if 60h+",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [1740, 380]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "combinator": "and" },
+          "conditions": [
+            { "leftValue": "={{ $json.hours_since_scan }}", "rightValue": 60, "operator": { "type": "number", "operation": "gt" } }
+          ]
+        }
+      },
+      "name": "IF Critical Delay",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1520, 380]
+    }
+  ],
+  "connections": {
+    "Cron Every Hour": { "main": [[{ "node": "Fetch Active Orders", "type": "main", "index": 0 }]] },
+    "Fetch Active Orders": { "main": [[{ "node": "Batch", "type": "main", "index": 0 }]] },
+    "Batch": { "main": [[{ "node": "Check Tracking", "type": "main", "index": 0 }]] },
+    "Check Tracking": { "main": [[{ "node": "Detect Delay", "type": "main", "index": 0 }]] },
+    "Detect Delay": { "main": [[{ "node": "IF Delay Detected", "type": "main", "index": 0 }]] },
+    "IF Delay Detected": {
+      "main": [
+        [
+          { "node": "Build Message", "type": "main", "index": 0 },
+          { "node": "IF Critical Delay", "type": "main", "index": 0 }
+        ]
+      ]
+    },
+    "Build Message": { "main": [[{ "node": "Send Email", "type": "main", "index": 0 }]] },
+    "IF Critical Delay": {
+      "main": [
+        [{ "node": "Escalate if 60h+", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Cron co godzine. Pobiera aktywne zamowienia z ostatnich 7 dni, sprawdza tracking u kuriera, wykrywa opoznienia (36h+ bez skanu), wysyla proaktywne powiadomienie email do klienta. Przy 60h+ eskaluje do konsultanta (Medium)."
+  },
+  "tags": ["wismo", "cron", "proactive"]
+}

@@ -1,0 +1,106 @@
+{
+  "name": "07 WISMO Channel WhatsApp",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wismo/whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Twilio Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [200, 300],
+      "webhookId": "wismo-whatsapp"
+    },
+    {
+      "parameters": {
+        "functionCode": "// Weryfikacja podpisu Twilio (X-Twilio-Signature) plus normalizacja payloadu.\nconst body = $input.first().json.body || $input.first().json;\nconst from = body.From || body.from || '';\nconst message = (body.Body || body.body || '').toString().trim();\n\nif (!message) {\n  return [{ json: { error: 'empty_message', from } }];\n}\n\n// WhatsApp session = numer telefonu, TTL 24h (Meta session window).\nconst sessionId = `whatsapp_${from.replace(/[^0-9+]/g, '')}`;\n\nreturn [{\n  json: {\n    session_id: sessionId,\n    channel: 'whatsapp',\n    user_message: message,\n    metadata: {\n      from,\n      profile_name: body.ProfileName || null,\n      wa_id: body.WaId || null,\n      num_media: parseInt(body.NumMedia || '0', 10)\n    },\n    ts: new Date().toISOString()\n  }\n}];"
+      },
+      "name": "Normalize WhatsApp",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "workflowId": { "value": "01_main_agent", "cachedResultName": "01 WISMO Main Agent" },
+        "workflowInputs": {
+          "values": [
+            { "name": "channel", "value": "whatsapp" },
+            { "name": "session_id", "value": "={{ $json.session_id }}" },
+            { "name": "message", "value": "={{ $json.user_message }}" }
+          ]
+        }
+      },
+      "name": "Delegate to Main Agent",
+      "type": "n8n-nodes-base.executeWorkflow",
+      "typeVersion": 1.2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Formater dla WhatsApp: wyplaszcza markdown (WhatsApp obsluguje tylko *bold*, _italic_, ~strike~, ```code```).\nconst reply = $json.reply || '(brak odpowiedzi)';\nlet whatsappText = reply\n  .replace(/\\*\\*(.+?)\\*\\*/g, '*$1*')   // **bold** -> *bold*\n  .replace(/^#+\\s+/gm, '')                // usun naglowki\n  .replace(/^\\s*[-*]\\s+/gm, '• ');       // listy na bullet unicode\n\n// Jesli odpowiedz zawiera propozycje akcji, wygeneruj Interactive Buttons.\nconst hasActionOffer = /powiadomienie|zmian[eę]|konsultant/i.test(whatsappText);\n\nconst payload = hasActionOffer ? {\n  interactive: {\n    type: 'button',\n    body: { text: whatsappText.slice(0, 1024) },\n    action: {\n      buttons: [\n        { type: 'reply', reply: { id: 'notify', title: 'Powiadom SMS' } },\n        { type: 'reply', reply: { id: 'human', title: 'Konsultant' } },\n        { type: 'reply', reply: { id: 'done', title: 'Dziekuje' } }\n      ]\n    }\n  }\n} : {\n  text: { body: whatsappText.slice(0, 1600) }\n};\n\nreturn [{ json: payload }];"
+      },
+      "name": "Format for WhatsApp",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [860, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://api.twilio.com/2010-04-01/Accounts/{{ $env.TWILIO_ACCOUNT_SID }}/Messages.json",
+        "method": "POST",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpBasicAuth",
+        "sendBody": true,
+        "contentType": "form-urlencoded",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "From", "value": "={{ $env.WHATSAPP_NUMBER }}" },
+            { "name": "To", "value": "={{ $node['Normalize WhatsApp'].json.metadata.from }}" },
+            { "name": "Body", "value": "={{ $json.text?.body || $json.interactive?.body?.text }}" }
+          ]
+        },
+        "options": {
+          "timeout": 5000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 }
+        }
+      },
+      "name": "Send via Twilio",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1080, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "OK",
+        "options": {}
+      },
+      "name": "Ack Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [1300, 300]
+    }
+  ],
+  "connections": {
+    "Twilio Webhook": { "main": [[{ "node": "Normalize WhatsApp", "type": "main", "index": 0 }]] },
+    "Normalize WhatsApp": { "main": [[{ "node": "Delegate to Main Agent", "type": "main", "index": 0 }]] },
+    "Delegate to Main Agent": { "main": [[{ "node": "Format for WhatsApp", "type": "main", "index": 0 }]] },
+    "Format for WhatsApp": { "main": [[{ "node": "Send via Twilio", "type": "main", "index": 0 }]] },
+    "Send via Twilio": { "main": [[{ "node": "Ack Webhook", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "saveDataErrorExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Kanal WhatsApp Business (przez Twilio). Odbiera POST od Twilio, normalizuje payload, deleguje do glownego agenta (01), formatuje odpowiedz z Interactive Buttons kiedy jest akcja, wysyla przez Twilio API. Session id = numer telefonu, TTL 24h (Meta session window)."
+  },
+  "tags": ["wismo", "channel", "whatsapp", "twilio"]
+}

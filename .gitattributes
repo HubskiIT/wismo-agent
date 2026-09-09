@@ -1,0 +1,33 @@
+# Auto detect and normalize line endings on checkin
+* text=auto eol=lf
+
+# Konkretne rozszerzenia
+*.py    text eol=lf
+*.js    text eol=lf
+*.json  text eol=lf
+*.yml   text eol=lf
+*.yaml  text eol=lf
+*.md    text eol=lf
+*.sh    text eol=lf
+*.bru   text eol=lf
+*.sql   text eol=lf
+*.conf  text eol=lf
+
+Makefile   text eol=lf
+Dockerfile text eol=lf
+
+# Binary files
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.mp4   binary
+*.woff  binary
+*.woff2 binary
+
+# Wykluczenia z linguist (GitHub language stats)
+*.json linguist-generated=true
+docs/* linguist-documentation=true

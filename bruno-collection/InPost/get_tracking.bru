@@ -1,0 +1,30 @@
+meta {
+  name: Get shipment tracking
+  type: http
+  seq: 1
+}
+
+get {
+  url: {{INPOST_BASE}}/tracking/{{tracking_number}}
+  body: none
+  auth: bearer
+}
+
+auth:bearer {
+  token: {{INPOST_API_TOKEN}}
+}
+
+vars:pre-request {
+  tracking_number: 660000123456
+}
+
+tests {
+  test("status is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("has tracking details", function() {
+    const b = res.getBody();
+    expect(b).to.have.property("tracking_number");
+    expect(b).to.have.property("status");
+  });
+}

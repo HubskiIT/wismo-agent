@@ -1,0 +1,35 @@
+meta {
+  name: Chat webhook - smoke test
+  type: http
+  seq: 1
+}
+
+post {
+  url: {{N8N_BASE}}/webhook/wismo/chat
+  body: json
+  auth: none
+}
+
+body:json {
+  {
+    "channel": "widget",
+    "session_id": "test_session_001",
+    "message": "Gdzie jest moja paczka?",
+    "metadata": {
+      "user_agent": "bruno-test"
+    }
+  }
+}
+
+tests {
+  test("status is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("returns reply", function() {
+    expect(res.getBody()).to.have.property("reply");
+    expect(res.getBody().reply).to.be.a("string");
+  });
+  test("session_id echoed", function() {
+    expect(res.getBody().session_id).to.equal("test_session_001");
+  });
+}

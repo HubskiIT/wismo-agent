@@ -1,0 +1,33 @@
+meta {
+  name: Get order by ID
+  type: http
+  seq: 1
+}
+
+get {
+  url: https://{{SHOPIFY_STORE}}/admin/api/2024-10/orders/{{order_id}}.json
+  body: none
+  auth: none
+}
+
+headers {
+  X-Shopify-Access-Token: {{SHOPIFY_ADMIN_TOKEN}}
+  Content-Type: application/json
+}
+
+vars:pre-request {
+  order_id: 12345
+}
+
+tests {
+  test("status is 200", function() {
+    expect(res.getStatus()).to.equal(200);
+  });
+  test("has order and fulfillment info", function() {
+    const b = res.getBody();
+    expect(b).to.have.property("order");
+    expect(b.order).to.have.property("id");
+    expect(b.order).to.have.property("financial_status");
+    expect(b.order).to.have.property("fulfillment_status");
+  });
+}

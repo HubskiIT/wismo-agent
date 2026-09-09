@@ -1,0 +1,107 @@
+{
+  "name": "02 WISMO Verify Identity",
+  "nodes": [
+    {
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "order_id", "type": "string" },
+            { "name": "email", "type": "string" },
+            { "name": "phone_last_4", "type": "string" }
+          ]
+        }
+      },
+      "name": "Sub-workflow Trigger",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "url": "=http://wismo-api:8000/identity/normalize",
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ order_id: $json.order_id, email: $json.email, phone_last_4: $json.phone_last_4 }) }}",
+        "options": { "timeout": 5000 }
+      },
+      "name": "Normalize Input",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [420, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "combinator": "and" },
+          "conditions": [
+            { "leftValue": "={{ $json.order_id }}", "rightValue": "", "operator": { "type": "string", "operation": "notEmpty" } }
+          ]
+        }
+      },
+      "name": "IF order_id present",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [640, 300]
+    },
+    {
+      "parameters": {
+        "url": "=https://{{ $env.SHOPIFY_STORE }}/admin/api/2024-10/orders/{{ $node['Normalize Input'].json.order_id }}.json",
+        "method": "GET",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "X-Shopify-Access-Token", "value": "={{ $env.SHOPIFY_ADMIN_TOKEN }}" }
+          ]
+        },
+        "options": {
+          "timeout": 5000,
+          "retry": { "enabled": true, "maxTries": 3, "waitBetweenTries": 1000 }
+        }
+      },
+      "name": "Shopify Get Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [860, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "// Dopasowanie e-maila lub telefonu z Levenshteinem 2 tolerancji.\nfunction lev(a, b) {\n  if (!a || !b) return Infinity;\n  a = a.toLowerCase(); b = b.toLowerCase();\n  const m = [];\n  for (let i = 0; i <= b.length; i++) { m[i] = [i]; }\n  for (let j = 0; j <= a.length; j++) { m[0][j] = j; }\n  for (let i = 1; i <= b.length; i++) {\n    for (let j = 1; j <= a.length; j++) {\n      if (b[i-1] === a[j-1]) m[i][j] = m[i-1][j-1];\n      else m[i][j] = Math.min(m[i-1][j-1]+1, m[i][j-1]+1, m[i-1][j]+1);\n    }\n  }\n  return m[b.length][a.length];\n}\n\nconst order = $node['Shopify Get Order'].json.order;\nif (!order) {\n  return [{ json: { verified: false, reason_code: 'E01_order_not_found' } }];\n}\n\nconst input = $node['Normalize Input'].json;\nconst storedEmail = (order.email || order.customer?.email || '').toLowerCase();\nconst storedPhone = (order.phone || order.customer?.phone || '').replace(/\\D/g, '');\n\nlet emailMatch = false;\nif (input.email && storedEmail) {\n  emailMatch = lev(input.email, storedEmail) <= 2;\n}\n\nlet phoneMatch = false;\nif (input.phone_last_4 && storedPhone) {\n  phoneMatch = storedPhone.endsWith(input.phone_last_4);\n}\n\nconst verified = emailMatch || phoneMatch;\n\nreturn [{\n  json: {\n    verified,\n    reason_code: verified ? 'ok' : 'E01_identity_mismatch',\n    order_id: order.id.toString(),\n    order_status: order.financial_status,\n    fulfillment_status: order.fulfillment_status,\n    tracking_number: order.fulfillments?.[0]?.tracking_number || null,\n    tracking_company: order.fulfillments?.[0]?.tracking_company || null\n  }\n}];"
+      },
+      "name": "Match Identity",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [1080, 220]
+    },
+    {
+      "parameters": {
+        "functionCode": "return [{ json: { verified: false, reason_code: 'E01_missing_order_id' } }];"
+      },
+      "name": "Missing Order ID",
+      "type": "n8n-nodes-base.function",
+      "typeVersion": 1,
+      "position": [860, 420]
+    }
+  ],
+  "connections": {
+    "Sub-workflow Trigger": { "main": [[{ "node": "Normalize Input", "type": "main", "index": 0 }]] },
+    "Normalize Input": { "main": [[{ "node": "IF order_id present", "type": "main", "index": 0 }]] },
+    "IF order_id present": {
+      "main": [
+        [{ "node": "Shopify Get Order", "type": "main", "index": 0 }],
+        [{ "node": "Missing Order ID", "type": "main", "index": 0 }]
+      ]
+    },
+    "Shopify Get Order": { "main": [[{ "node": "Match Identity", "type": "main", "index": 0 }]] }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveDataSuccessExecution": "all",
+    "timezone": "Europe/Warsaw"
+  },
+  "meta": {
+    "version": "0.1.0",
+    "description": "Sub workflow weryfikacji tozsamosci. Wywolywany z 01 jako Tool `verify_identity`. Zwraca verified: bool plus reason_code plus kontekst zamowienia."
+  },
+  "tags": ["wismo", "sub-workflow", "tool"]
+}

@@ -1,0 +1,200 @@
+version: "3.9"
+
+# =============================================================================
+# WISMO Agent. Stack produkcyjny dla modułu Agent CS i Tracking WISMO.
+# Uruchomienie: `docker compose up -d` (po uzupełnieniu pliku .env).
+# =============================================================================
+
+services:
+
+  # ---------------------------------------------------------------------------
+  # n8n. Orkiestracja workflowów agenta.
+  # ---------------------------------------------------------------------------
+  n8n:
+    image: n8nio/n8n:latest
+    container_name: wismo-n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - WEBHOOK_URL=${WEBHOOK_URL:-http://localhost:5678/}
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      - N8N_BASIC_AUTH_ACTIVE=${N8N_BASIC_AUTH_ACTIVE:-true}
+      - N8N_BASIC_AUTH_USER=${N8N_BASIC_AUTH_USER:-admin}
+      - N8N_BASIC_AUTH_PASSWORD=${N8N_BASIC_AUTH_PASSWORD}
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${DB_POSTGRESDB_DATABASE:-n8n}
+      - DB_POSTGRESDB_USER=${DB_POSTGRESDB_USER:-n8n}
+      - DB_POSTGRESDB_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      - EXECUTIONS_MODE=queue
+      - QUEUE_BULL_REDIS_HOST=redis
+      - QUEUE_BULL_REDIS_PORT=6379
+      - N8N_METRICS=true
+      - GENERIC_TIMEZONE=Europe/Warsaw
+      - TZ=Europe/Warsaw
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ../n8n-workflows:/workflows:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:5678/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    networks:
+      - wismo-net
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL. Baza n8n plus audit log rozmów agenta.
+  # ---------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    container_name: wismo-postgres
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=${DB_POSTGRESDB_DATABASE:-n8n}
+      - POSTGRES_USER=${DB_POSTGRESDB_USER:-n8n}
+      - POSTGRES_PASSWORD=${DB_POSTGRESDB_PASSWORD}
+      - POSTGRES_INITDB_ARGS=--auth-host=scram-sha-256
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_POSTGRESDB_USER:-n8n}"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - wismo-net
+
+  # ---------------------------------------------------------------------------
+  # Redis. Pamięć sesji agenta plus kolejka BullMQ dla n8n.
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: wismo-redis
+    restart: unless-stopped
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+    networks:
+      - wismo-net
+
+  # ---------------------------------------------------------------------------
+  # WISMO API. Opcjonalny mikroserwis FastAPI (guardrails, PII, walidacje).
+  # ---------------------------------------------------------------------------
+  wismo-api:
+    build:
+      context: ../src
+      dockerfile: Dockerfile
+    container_name: wismo-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - LLM_MODEL=${LLM_MODEL:-claude-sonnet-5}
+      - LLM_FALLBACK_MODEL=${LLM_FALLBACK_MODEL:-gpt-4o-mini}
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql://${DB_POSTGRESDB_USER:-n8n}:${DB_POSTGRESDB_PASSWORD}@postgres:5432/${DB_POSTGRESDB_DATABASE:-n8n}
+      - MAX_TOKENS_PER_SESSION=${MAX_TOKENS_PER_SESSION:-8000}
+      - PII_REDACTION=${PII_REDACTION:-true}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fs", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    networks:
+      - wismo-net
+
+  # ---------------------------------------------------------------------------
+  # Nginx. Reverse proxy z TLS i rate limitingiem.
+  # ---------------------------------------------------------------------------
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: wismo-nginx
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/conf.d:/etc/nginx/conf.d:ro
+      - ./nginx/certs:/etc/nginx/certs:ro
+    depends_on:
+      - n8n
+      - wismo-api
+    networks:
+      - wismo-net
+
+  # ---------------------------------------------------------------------------
+  # Grafana Loki. Centralne logi z n8n i wismo-api.
+  # ---------------------------------------------------------------------------
+  loki:
+    image: grafana/loki:2.9.0
+    container_name: wismo-loki
+    restart: unless-stopped
+    command: -config.file=/etc/loki/local-config.yaml
+    volumes:
+      - loki_data:/loki
+    networks:
+      - wismo-net
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    container_name: wismo-grafana
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_ADMIN_PASSWORD:-changeme}
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on:
+      - loki
+    networks:
+      - wismo-net
+
+# =============================================================================
+# Wolumeny i sieć.
+# =============================================================================
+
+volumes:
+  n8n_data:
+    driver: local
+  pg_data:
+    driver: local
+  redis_data:
+    driver: local
+  loki_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  wismo-net:
+    driver: bridge
